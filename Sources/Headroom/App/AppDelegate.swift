@@ -45,6 +45,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         refresh()
 
+        // `--demo-calibrate` opens the calibration sheet so its layout can be
+        // checked without a human clicking through to it.
+        if ProcessInfo.processInfo.arguments.contains("--demo-calibrate") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                MainActor.assumeIsolated {
+                    NSApp.activate(ignoringOtherApps: true)
+                    self?.calibrateAction()
+                }
+            }
+        }
+
         // `--demo-menu` pops the menu open on its own so the layout can be
         // screenshotted and checked without a human clicking it.
         if ProcessInfo.processInfo.arguments.contains("--demo-menu") {
@@ -322,13 +333,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// needs no outage, and re-anchors against the figure the vendor actually
     /// enforces — including claude.ai and desktop-app usage, which shares the
     /// plan limit but never appears in the local Claude Code logs.
+    ///
+    /// The weekly reset day and hour live here too. They are not cosmetic: the
+    /// weekly window is a fixed calendar window, so the wrong anchor sums the
+    /// wrong days. It defaults to Friday 6:00 AM, which is one account's
+    /// schedule, not everyone's.
     @objc private func calibrateAction() {
-        guard let snap = snapshots[.claude], let raw = snap.rawWeighted else { return }
+        guard let snap = snapshots[.claude] else { return }
+        let calibration = CalibrationStore.load()
 
         let alert = NSAlert()
         alert.messageText = "Calibrate Claude usage"
         alert.informativeText = """
-            Open Claude → Settings → Usage and enter the two "% used" figures.
+            Open Claude → Settings → Usage. Enter the two "% used" figures, and \
+            set the weekly reset to match the "Resets …" line shown there.
 
             This also captures usage from claude.ai and the Claude desktop app, which \
             share your plan limit but never appear in the local Claude Code logs.
@@ -336,45 +354,109 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.addButton(withTitle: "Calibrate")
         alert.addButton(withTitle: "Cancel")
 
-        let stack = NSStackView(frame: NSRect(x: 0, y: 0, width: 280, height: 56))
+        let stack = NSStackView(frame: NSRect(x: 0, y: 0, width: 360, height: 88))
         stack.orientation = .vertical
         stack.spacing = 8
         stack.alignment = .trailing
 
-        func field(_ caption: String) -> (NSStackView, NSTextField) {
-            let row = NSStackView()
-            row.orientation = .horizontal
-            row.spacing = 8
-            let label = NSTextField(labelWithString: caption)
+        func row(_ caption: String, _ control: NSView) -> NSStackView {
+            let r = NSStackView()
+            r.orientation = .horizontal
+            r.spacing = 8
+            r.addArrangedSubview(NSTextField(labelWithString: caption))
+            r.addArrangedSubview(control)
+            return r
+        }
+
+        func percentField() -> NSTextField {
             let input = NSTextField(string: "")
             input.placeholderString = "% used"
             input.widthAnchor.constraint(equalToConstant: 76).isActive = true
-            row.addArrangedSubview(label)
-            row.addArrangedSubview(input)
-            return (row, input)
+            return input
         }
 
-        let (row1, shortField) = field("Current session:")
-        let (row2, longField) = field("Weekly (all models):")
-        stack.addArrangedSubview(row1)
-        stack.addArrangedSubview(row2)
+        let shortField = percentField()
+        let longField = percentField()
+
+        let weekdayPopup = NSPopUpButton()
+        // Calendar.current, not Calendar(identifier:) — a calendar built with no
+        // locale silently hands back abbreviated symbols ("Fri"), which read as a
+        // clipped label rather than a deliberate one.
+        weekdayPopup.addItems(withTitles: Calendar.current.weekdaySymbols)
+        weekdayPopup.selectItem(at: min(6, max(0, calibration.weeklyResetWeekday - 1)))
+        // Wide enough for "Wednesday" — otherwise it silently clips to "Wed".
+        weekdayPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 116).isActive = true
+
+        let hourPopup = NSPopUpButton()
+        hourPopup.addItems(withTitles: (0..<24).map { h in
+            let display = h % 12 == 0 ? 12 : h % 12
+            return "\(display):00 \(h < 12 ? "AM" : "PM")"
+        })
+        hourPopup.selectItem(at: min(23, max(0, calibration.weeklyResetHour)))
+        hourPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 104).isActive = true
+
+        let resetRow = NSStackView()
+        resetRow.orientation = .horizontal
+        resetRow.spacing = 6
+        resetRow.addArrangedSubview(NSTextField(labelWithString: "Weekly resets:"))
+        resetRow.addArrangedSubview(weekdayPopup)
+        resetRow.addArrangedSubview(hourPopup)
+
+        stack.addArrangedSubview(row("Current session:", shortField))
+        stack.addArrangedSubview(row("Weekly (all models):", longField))
+        stack.addArrangedSubview(resetRow)
         alert.accessoryView = stack
         alert.window.initialFirstResponder = shortField
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        var calibration = CalibrationStore.load()
-        var changed = false
-        for (text, window) in [(shortField.stringValue, QuotaWindow.short),
-                               (longField.stringValue, QuotaWindow.long)] {
-            guard let v = Double(text.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "%", with: "")),
-                  v > 0, v <= 100, let sum = raw[window] else { continue }
-            calibration.calibrate(observedUsedPercent: v, weightedSum: sum, for: window)
-            changed = true
+        let newWeekday = weekdayPopup.indexOfSelectedItem + 1     // Calendar: 1 = Sunday
+        let newHour = hourPopup.indexOfSelectedItem
+        let anchorMoved = newWeekday != calibration.weeklyResetWeekday
+                       || newHour != calibration.weeklyResetHour
+
+        // Persist the anchor before deriving anything from it. The weekly total
+        // is a function of the window, so a percentage typed in now has to be
+        // divided by a sum measured under the *new* window — using the old sum
+        // would bake the wrong capacity in at the moment of correcting it.
+        var updated = calibration
+        updated.weeklyResetWeekday = newWeekday
+        updated.weeklyResetHour = newHour
+        CalibrationStore.save(updated)
+
+        let shortText = shortField.stringValue
+        let longText = longField.stringValue
+        let claude = providers.first { $0.id == .claude }
+        let fallback = snap.rawWeighted
+
+        Task.detached(priority: .userInitiated) {
+            var raw = fallback
+            if anchorMoved, let fresh = try? claude?.snapshot(), let r = fresh.rawWeighted {
+                raw = r                       // re-measured under the new window
+            }
+            let measured = raw
+            await MainActor.run { [weak self] in
+                guard let self, let measured else { return }
+                var cal = CalibrationStore.load()
+                var changed = false
+                for (text, window) in [(shortText, QuotaWindow.short),
+                                       (longText, QuotaWindow.long)] {
+                    guard let v = Self.percent(from: text), let sum = measured[window] else { continue }
+                    cal.calibrate(observedUsedPercent: v, weightedSum: sum, for: window)
+                    changed = true
+                }
+                if changed { CalibrationStore.save(cal) }
+                self.refresh()
+            }
         }
-        guard changed else { return }
-        CalibrationStore.save(calibration)
-        refresh()
+    }
+
+    /// Accepts "54", "54%", " 54 % " — people paste what they see.
+    private static func percent(from text: String) -> Double? {
+        let cleaned = text.replacingOccurrences(of: "%", with: "")
+            .trimmingCharacters(in: .whitespaces)
+        guard let v = Double(cleaned), v > 0, v <= 100 else { return nil }
+        return v
     }
 
     @objc private func refreshAction() { refresh() }
