@@ -1,0 +1,9 @@
+# Build products
+.build/
+build/
+*.dmg
+*.icns
+*.iconset/
+
+# macOS
+.DS_Store
