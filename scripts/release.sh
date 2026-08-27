@@ -14,24 +14,47 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# Your own Developer ID. Override per machine rather than hardcoding one
-# person's certificate into the repo — nobody else can build with it:
-#   export HEADROOM_IDENTITY="Developer ID Application: Your Name (TEAMID)"
-#   export HEADROOM_TEAM_ID="TEAMID"
-IDENTITY="${HEADROOM_IDENTITY:?set HEADROOM_IDENTITY, e.g. \"Developer ID Application: Your Name (TEAMID)\" — see: security find-identity -v -p codesigning}"
-TEAM_ID="${HEADROOM_TEAM_ID:-}"
+# Signing identity. Auto-detected when your keychain holds exactly one
+# "Developer ID Application" certificate, which is the normal case — hardcoding
+# one person's identity would stop anyone else building this at all. Override
+# with HEADROOM_IDENTITY when you have several.
+if [ -n "${HEADROOM_IDENTITY:-}" ]; then
+    IDENTITY="$HEADROOM_IDENTITY"
+else
+    FOUND=$(security find-identity -v -p codesigning 2>/dev/null \
+            | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p')
+    COUNT=$(printf '%s' "$FOUND" | grep -c . || true)
+    if [ "$COUNT" -eq 1 ]; then
+        IDENTITY="$FOUND"
+    elif [ "$COUNT" -eq 0 ]; then
+        echo "No 'Developer ID Application' certificate in your keychain." >&2
+        echo "You need one from the Apple Developer Program to sign for" >&2
+        echo "distribution. Check with: security find-identity -v -p codesigning" >&2
+        exit 1
+    else
+        echo "Several Developer ID certificates found. Pick one:" >&2
+        printf '  export HEADROOM_IDENTITY="%s"\n' $FOUND >&2
+        exit 1
+    fi
+fi
+
+# Team ID falls out of the identity string: "... Name (TEAMID)".
+TEAM_ID="${HEADROOM_TEAM_ID:-$(printf '%s' "$IDENTITY" | sed -n 's/.*(\([A-Z0-9]*\))$/\1/p')}"
+
 # Anaconda ships its own `codesign` that shadows Apple's on PATH and fails with
 # "arguments were not expected". Always call the system tools by absolute path.
 CODESIGN=/usr/bin/codesign
 HDIUTIL=/usr/bin/hdiutil
 ICONUTIL=/usr/bin/iconutil
 SPCTL=/usr/sbin/spctl
+
 PROFILE="Headroom"
 APP="build/Headroom.app"
 DMG="build/Headroom.dmg"
 VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" Resources/Info.plist)
 
 echo "==> building $VERSION"
+echo "    signing as: $IDENTITY"
 swift build -c release
 
 echo "==> icon"
