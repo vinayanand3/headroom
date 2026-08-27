@@ -1,199 +1,194 @@
 # Headroom
 
-A native macOS menu bar app that shows how much AI quota you have left, as a
-liquid capsule pinned to the right edge of the camera notch.
+How much AI quota you have left, in your macOS menu bar.
 
-**Status: v0.3.** Menu bar gauge needle + a live drop-down with animated drain
-capsules per agent. The notch panel was dropped (see `Attic/`).
+A gauge needle shows the agent you're currently using; click it for per-agent
+detail with animated drain capsules. It reads only the logs those tools already
+write to your disk — **no network, no credentials, no API keys, and it consumes
+none of your tokens.**
+
+Requires macOS 14+.
+
+## Install
+
+Download `Headroom.dmg` from [Releases](../../releases), drag it to Applications,
+and launch. It's a menu bar app — no Dock icon. Signed and notarized, with
+tickets stapled to both the DMG and the app, so it installs offline.
+
+## Agent support
+
+| Agent | Source | Accuracy |
+| --- | --- | --- |
+| **Codex** | `~/.codex/sessions/**/rollout-*.jsonl` | **exact** — the server computes `used_percent` and Codex writes it down |
+| **Claude** | `~/.claude/projects/**/*.jsonl` | **estimated** — a weighted token ledger divided by a capacity you calibrate |
+| **Gemini** | — | **none** — see below |
+
+Everything the UI shows reads as **remaining**. "73% left" means 73% left.
+
+### Why Claude needs calibrating and Codex doesn't
+
+Codex reports the same percentage the server enforces, so there is nothing to
+estimate and nothing to calibrate.
+
+Claude Code logs exact per-message token counts and never logs the limit those
+counts are measured against. So Headroom computes a numerator and has to learn
+the denominator. Run **Calibrate from Claude's usage page…** once: open
+Claude → Settings → Usage, enter the two "% used" figures, and set the weekly
+reset day and hour to match the "Resets …" line shown there.
+
+Calibrating also captures usage from claude.ai and the Claude desktop app. Those
+share your plan limit but never appear in the local Claude Code logs, so they are
+an irreducible blind spot between calibrations.
+
+### Why Gemini shows nothing
+
+Both Google apps *display* quota and neither *stores* it — verified rather than
+assumed. Antigravity's `state.vscdb` has one quota-shaped key, `modelCredits`,
+which decodes to credit sentinels rather than percentages. The Gemini desktop app
+keeps no LocalStorage or IndexedDB, and its URL cache holds only fonts. Both panes
+carry a refresh button and an "Updated just now" line: the numbers are fetched
+live per view.
+
+Reading them would mean calling Google's endpoint with your OAuth token. This
+project doesn't do that for Claude and doesn't do it here either.
+
+Agents that are detected but unreadable get one explanatory line in the menu, so
+a missing agent reads as "looked for, here's why" rather than as a bug.
+
+## Build
 
 ```bash
-./scripts/bundle.sh          # unsigned .app, for local dev
+./scripts/bundle.sh
 ```
 
 ```bash
-./scripts/release.sh         # signed .app + .dmg, ready to notarise
+./scripts/release.sh
 ```
 
 ```bash
-./scripts/release.sh notarize   # the above, then notarise + staple
+./scripts/release.sh notarize
 ```
 
 ```bash
 ./.build/release/Headroom --probe
 ```
 
-`--probe` prints what the providers can actually see and exits. When a vendor
-changes a log format, this is the fastest way to find out what broke.
-
----
-
-## What works
-
-- **Codex quota, server-authoritative.** Read straight from
-  `~/.codex/sessions/**/rollout-*.jsonl`. No network, no credentials, no API keys.
-- **Claude quota, estimated.** Weighted token ledger over rolling 5h/7d windows,
-  binary-searched to the cutoff — **78 ms across 128 MB**. Self-calibrates from
-  observed rate-limit rejections.
-- **A variable-value gauge needle** in the menu bar (`gauge.with.dots.needle`
-  sweeps continuously) plus the single worst number across all agents.
-- **Live drain capsules in the drop-down.** One row per agent per window, with
-  the Wave Meniscus animation replaying each time the menu opens — an explicit
-  user action, so the motion marks something real and costs nothing when closed.
-  Solid meniscus = measured, dashed = inferred.
-- **Manual calibration** against Claude's own usage page, which is the only way
-  to see usage from claude.ai and the desktop app.
-- **Notch-adjacent panel** at CGWindow layer 25 — the same layer Control Center's
-  own items occupy. Verified in place at x=962, y=0 on a 16" MacBook Pro.
-- **Wave Meniscus animation** with velocity-driven slosh and spring settle.
-- **0.0% CPU idle and 0.0% during a live agent session**, ~46 MB RSS. Measured, not asserted.
-- Adaptive width, live FSEvents refresh, status item fallback with menu.
+`bundle.sh` makes an unsigned `.app` for local development; `release.sh` signs and
+packages one. `--probe` prints what the providers can actually see and exits —
+when a vendor changes a log format, that's the fastest way to find out what broke.
 
 ## Architecture
 
 | File | Role |
 | --- | --- |
-| `Model/Reading.swift` | `Reading` enum — the epistemics of a number |
-| `Providers/CodexProvider.swift` | Reverse-tail parser (authoritative) |
-| `Providers/ClaudeProvider.swift` | Binary-search ledger (estimated) |
-| `Providers/Calibration.swift` | Learns the limit Claude never writes down |
-| `Watch/FileWatcher.swift` | One shared FSEvents stream |
-| `Render/DrainView.swift` | Wave Meniscus renderer |
-| `Panel/GaugePanel.swift` | Borderless `NSPanel` at `.statusBar` |
-| `Panel/PanelController.swift` | Placement and contested-space arbitration |
+| `Model/Reading.swift` | the `Reading` enum — the epistemics of a number |
+| `Providers/CodexProvider.swift` | reverse-tail parser (authoritative) |
+| `Providers/ClaudeProvider.swift` | incremental token ledger (estimated) |
+| `Providers/Calibration.swift` | learns the limit Claude never writes down |
+| `Providers/GeminiProvider.swift` | honest detection, no invented numbers |
+| `Watch/FileWatcher.swift` | one shared FSEvents stream |
+| `Render/MenuRowView.swift` | the animated drain capsule |
+| `App/AppDelegate.swift` | status item, menu, calibration sheet |
 
 ### Why `Reading` is not a `Double`
 
 Codex hands you a server-computed percentage. Claude hands you raw token counts
 and hides the denominator. Collapsing both into one `percent: Double` forces you
-to invent numbers for Claude, which is how these tools end up lying. So a reading
-is `.authoritative`, `.estimated` (rendered with a dashed meniscus), or
-`.unavailable` — and the UI always shows which.
-
----
+to invent numbers for Claude, which is how tools like this end up lying. A reading
+is `.authoritative`, `.estimated` (with a confidence), or `.unavailable` — and the
+UI always makes clear which it is showing.
 
 ## Things learned the hard way
 
-Each of these was a real bug found by running against live data, not a
+Every one of these was a real bug found by running against live data, not a
 hypothetical:
 
-1. **Session files reach 72 MB.** Never parse forward. Reverse tail from the end
-   parses in ~8 ms.
-2. **Codex emits two kinds of `rate_limits`.** `limit_id: "codex"` carries the
-   percentages; `limit_id: "premium"` carries credits and leaves `primary`
-   **null**. Taking the last `token_count` event shows an empty gauge about half
-   the time. Scan backward for the last event with a non-null `primary`.
+1. **Claude Code's JSONL is not chronological.** Measured on real transcripts, 86%
+   of records arrive out of order with backward jumps of up to 21 hours, because
+   sidechains, resumed sessions and compaction all interleave. An earlier version
+   binary-searched by timestamp on the assumption that an append-only log is
+   ordered; it landed near EOF and under-counted the weekly total by 4.5x. Read
+   each file once, then only the bytes appended since.
+2. **Codex emits two shapes of `rate_limits`.** `limit_id: "codex"` carries the
+   percentages; `limit_id: "premium"` carries credits and leaves `primary` null.
+   Taking the last `token_count` event shows an empty gauge about half the time.
+   Scan backward for the last event with a non-null `primary`.
 3. **An expired `resetsAt` is worse than no data.** These logs only advance while
-   Codex runs. Once the reset passes, a cached "100%" tells someone with a fresh
-   window that they're blocked. Report the reset instead.
-4. **`isFloatingPanel` overwrites `level`.** Assign it *before* `level`, or the
-   panel silently drops from layer 25 to layer 3 — where AppKit refuses to let it
-   overlap the menu bar at all.
-5. **AppKit constrains windows out of the menu bar.** Override
-   `constrainFrameRect(_:to:)` to return the frame unchanged.
-6. **A transparent window doesn't erase itself.** Without `ctx.clear(dirtyRect)`
-   the label composites onto its own ghost every frame.
-7. **Every status item is owned by the `Control Center` process** — yours and
-   every third-party app's. Filtering the window list by your own PID excludes
-   nothing.
-8. **The panel counts itself as a neighbour.** Its own layer-25 window sits in the
-   strip it's measuring, so it computes negative clear space and hides one frame
-   after appearing. Exclude by window number.
-9. **Everything shows *remaining*, never *used*.** The capsule once filled to
-   "remaining" while its label read "used" — two contradictory statements at
-   once, and no way for the reader to tell which. `Reading` now exposes
-   `percentUsed` and `percentRemaining` separately, and only the latter is ever
-   displayed.
-10. **AppKit disables menu items that have no action**, so a menu full of data
-    rows renders entirely greyed out. `menu.autoenablesItems = false`.
-11. **Debouncing isn't enough while an agent is running.** Its log is written
-    continuously, so a 400 ms debounce still fired several times a second at
-    ~75 ms per scan — measured at 17% of a core. A hard floor between scans
-    (6 s) drops it to 0%. The gauge may lag a few seconds; it may not spin your fans.
-12. **The strip beside the notch is contested.** macOS lays status items out
-   leftward from the screen edge. On a busy menu bar there may be under 50pt free.
-   The panel measures what's genuinely clear and drops the text label, then hides,
-   rather than drawing over a neighbour.
-
-## Placement: right vs left of the notch
-
-Both strips are contested, but by different owners — and that asymmetry decides
-which one to prefer:
-
-| | Right of notch | Left of notch |
-| --- | --- | --- |
-| Owned by | status items | frontmost app's menus |
-| Changes when | you add/remove a menu bar app | **every app switch** |
-| Measurable | exactly, via the window server | only with Accessibility |
-| Here | ~104pt clear | ~200pt+ clear, if measurable |
-
-Right is preferred even when it's tighter, because it's *knowable*. Left is used
-only as a fallback, and it's genuinely useful **only if Accessibility is
-granted** — `AXUIElementCopyAttributeValue(kAXMenuBarAttribute)` returns
-`kAXErrorAPIDisabled` (-25211) without it, leaving us to assume a 720pt menu
-extent, which yields barely more room than the right strip. The app never
-triggers the permission prompt on its own; the menu offers it.
-
-## Agent support
-
-| Agent | Source | Accuracy |
-| --- | --- | --- |
-| Codex | `~/.codex/sessions/**/rollout-*.jsonl` | **exact** — vendor-computed `used_percent` |
-| Claude | `~/.claude/projects/**/*.jsonl` | **estimated** — token ledger ÷ learned capacity |
-| Gemini | — | none: no CLI installed, and Antigravity writes no quota to disk |
-
-Codex needs no calibration and cannot be calibrated: it reports the same
-percentage the server enforces. Claude has to be calibrated because its logs
-carry a numerator with no denominator.
-
-Agents that are detected but unreadable get one explanatory line in the menu,
-so an absent agent reads as "looked for, here's why" rather than as a bug.
+   the tool runs. Once the reset passes, a cached "100%" tells someone with a
+   fresh window that they're blocked. Report the reset instead.
+4. **The 5-hour limit is a session window, not a rolling one.** It opens on your
+   first message and runs five hours. Reconstructing the blocks and checking the
+   inferred reset against Claude's own countdown agreed to within four minutes.
+5. **The weekly limit is a fixed calendar window** ("Resets Fri 6:00 AM"), so the
+   reset day and hour decide which days get summed. It's configurable for exactly
+   that reason.
+6. **Debouncing isn't enough while an agent is running.** Its log is written
+   continuously, so a 400 ms debounce still fired several times a second at ~75 ms
+   per scan — 17% of a core, measured. A hard floor between scans drops it to 0%.
+   The gauge may lag a few seconds; it may not spin your fans.
+7. **Everything shows *remaining*, never *used*.** A capsule once filled to
+   "remaining" beside a label reading "used" — two contradictory statements at
+   once, with no way for the reader to tell which. `Reading` exposes
+   `percentUsed` and `percentRemaining` separately and only the latter is shown.
+8. **AppKit disables menu items that have no action**, so a menu full of data rows
+   renders entirely greyed out. `menu.autoenablesItems = false`.
+9. **`Calendar(identifier:)` with a nil locale silently returns abbreviated
+   weekday symbols** ("Fri"), which reads as a clipped label. `Calendar.current`
+   returns full names.
+10. **Anaconda ships its own `codesign`** that shadows Apple's on `PATH` and fails
+    with "arguments were not expected". The release script calls the system tools
+    by absolute path.
+11. **Stapling only the DMG isn't enough.** `spctl` passes the app via an *online*
+    lookup, but once dragged to `/Applications` it carries no ticket of its own, so
+    a first launch offline can hang. Notarise and staple the `.app` first, then
+    build the DMG around it.
 
 ## Distribution
 
 `scripts/release.sh` builds, signs with Developer ID, hardens the runtime, adds a
-secure timestamp and produces a drag-to-Applications `.dmg`.
+secure timestamp, and produces a drag-to-Applications `.dmg`.
+
+The signing identity is auto-detected when your keychain holds exactly one
+`Developer ID Application` certificate. Override with `HEADROOM_IDENTITY` when you
+have several.
 
 Notarisation needs an App Store Connect credential in your keychain. Create it
-once — it takes your Apple ID and an app-specific password from
-appleid.apple.com, and nothing in this repo ever sees either:
+once — it takes your Apple ID and an app-specific password, and nothing in this
+repo ever sees either:
 
 ```bash
-export HEADROOM_IDENTITY="Developer ID Application: Your Name (TEAMID)"
-export HEADROOM_TEAM_ID="TEAMID"
-xcrun notarytool store-credentials "Headroom" --apple-id "you@example.com" --team-id "$HEADROOM_TEAM_ID"
+xcrun notarytool store-credentials "Headroom" --apple-id "you@example.com" --team-id "YOURTEAMID"
 ```
 
-Find your identity with `security find-identity -v -p codesigning`.
+### Why not the Mac App Store
 
-Then `./scripts/release.sh notarize`. Until that runs, `spctl` reports
-`rejected — Unnotarized Developer ID`, which is expected.
-
-The script notarises **twice**, deliberately: once for the `.app` before it is
-wrapped, and again for the finished `.dmg`. Stapling only the DMG leaves the app
-itself without a ticket, so once a teammate drags it to `/Applications` Gatekeeper
-falls back to an online lookup — fine at a desk, a hang or a failure on a plane or
-a restricted network. Stapling the app first makes it work offline.
-
-**Gotcha:** Anaconda ships its own `codesign` that shadows Apple's on `PATH` and
-fails with "arguments were not expected". The script calls `/usr/bin/codesign`
-and friends by absolute path for exactly this reason.
+The App Store requires App Sandbox, and a sandboxed process cannot read
+`~/.claude`, `~/.codex` or `~/.gemini` — which is the entire app. The only
+sandbox-legal route is `NSOpenPanel` plus security-scoped bookmarks, meaning the
+user hand-grants three hidden dotfolders on first run and re-grants them when the
+bookmarks go stale. Developer ID is the correct channel for a tool like this, not
+a fallback.
 
 ## Known limitations
 
-- **Claude's plan limit is shared with claude.ai and the desktop app.** The local
-  logs only ever contain Claude Code, so anything done in the web or desktop app
-  counts against the real limit and is invisible here. This is structural, not a
-  bug — it's why manual calibration exists.
-- **The weekly window is modelled as rolling 7 days, but Claude's is a fixed
-  calendar window** (e.g. "Resets Fri 6:00 AM"). Wrong shape.
-- **Temporary limit boosts distort calibration.** A capacity learned during a
-  promotion expires with it.
-- **Claude's capacity seed is a guess.** Anthropic doesn't publish the limit and
-  Claude Code doesn't log it, so until a real rejection is observed the gauge runs
-  on a placeholder constant at confidence 0.25 and renders a dashed meniscus. The
-  first rejection replaces it with a measured value.
-- **Calibration needs a rejection to bootstrap.** A user who never hits their
-  limit never calibrates — acceptable, since they don't need the gauge, but the
-  number stays a rough estimate until then.
-- **Placement re-checks only on refresh**, not when a neighbour appears. There's
-  no notification for status item layout changes.
+- **Claude's figure is an estimate.** The weighting of cache reads, cache writes,
+  output tokens and model tier is not published, so the proxy drifts as the token
+  mix changes. Recalibrate now and then.
+- **claude.ai and the Claude desktop app are invisible** to the local logs but
+  share your plan limit.
+- **Log formats are undocumented** and can change without notice. Every parse is
+  fallible and degrades to "unavailable" rather than to a wrong number.
+- **Not sandboxed**, necessarily. If your Mac is under MDM restricting
+  non-App-Store apps, that's a separate gate.
+
+## `Attic/`
+
+Working, verified code the current design doesn't use — a notch-adjacent `NSPanel`
+at CGWindow layer 25 (the layer Control Center's own items occupy), its placement
+and contested-space arbitration, and a stacked multi-agent capsule renderer. It is
+not compiled. It was dropped for design reasons, not because it was broken; the
+comments explain what each piece solved.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
