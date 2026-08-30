@@ -9,6 +9,8 @@ none of your tokens.**
 
 Requires macOS 14+.
 
+![The Headroom menu, showing Codex and Claude quota](docs/menu.png)
+
 ## Install
 
 Download `Headroom.dmg` from [Releases](../../releases), drag it to Applications,

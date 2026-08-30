@@ -77,16 +77,16 @@ struct GeminiProvider: UsageProvider {
         let reason: String
         switch install {
         case .none:
-            reason = "no Gemini CLI found"
+            reason = "not installed"
         case .desktopApp:
-            reason = "Gemini app shows usage but fetches it live; nothing on disk"
+            reason = "usage not stored on disk"
         case .antigravityOnly:
-            reason = "Antigravity fetches quota live; nothing is stored on disk"
+            reason = "Antigravity: not stored on disk"
         case .cli:
             // Detection is verified; the log format is not. Shipping an untested
             // parser would produce confident wrong numbers, which is worse than
             // an honest blank.
-            reason = "Gemini CLI found — usage parsing not implemented"
+            reason = "CLI found, not yet supported"
         }
         return Snapshot(provider: id,
                         readings: Dictionary(uniqueKeysWithValues:

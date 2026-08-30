@@ -28,7 +28,10 @@ final class MenuRowView: NSView {
 
     init(title: String) {
         self.title = title
-        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 22))
+        // A menu item with a custom view fixes the menu's width, so plain-title
+        // rows below get clipped rather than widening it. Sized for the longest
+        // of those lines, not just for the capsule.
+        super.init(frame: NSRect(x: 0, y: 0, width: 356, height: 22))
     }
 
     required init?(coder: NSCoder) { fatalError() }

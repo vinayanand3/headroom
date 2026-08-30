@@ -281,6 +281,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let p = NSMutableParagraphStyle()
         p.firstLineHeadIndent = indent
         p.headIndent = indent
+        // A menu item shows one line. Without this, an over-long string wraps and
+        // the remainder is silently dropped — the reader sees a sentence that
+        // just stops. Truncating at least admits that something was cut.
+        p.lineBreakMode = .byTruncatingTail
         return NSAttributedString(string: text, attributes: [
             .font: NSFont.systemFont(ofSize: 11),
             .foregroundColor: NSColor.tertiaryLabelColor,
@@ -320,7 +324,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             bits.append("resets \(RelativeDateTimeFormatter().localizedString(for: resets, relativeTo: Date()))")
         }
         if let age = snap.staleness, age > 1800 {
-            bits.append("stale \(Int(age / 60))m")
+            // Minutes stop being readable past an hour or so: "stale 1066m"
+            // makes the reader do arithmetic to learn "yesterday".
+            let mins = Int(age / 60)
+            bits.append(mins < 90 ? "stale \(mins)m" : "stale \(Int((age / 3600).rounded()))h")
         }
         return bits.joined(separator: " · ")
     }
