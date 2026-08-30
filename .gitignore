@@ -10,3 +10,6 @@ build/
 
 # Private engineering journal — kept locally, not published
 tasks/
+
+# Medium draft — personal, not repo content
+medium-article.html
