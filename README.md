@@ -111,36 +111,43 @@ hypothetical:
    binary-searched by timestamp on the assumption that an append-only log is
    ordered; it landed near EOF and under-counted the weekly total by 4.5x. Read
    each file once, then only the bytes appended since.
-2. **Codex emits two shapes of `rate_limits`.** `limit_id: "codex"` carries the
+2. **A resumed session keeps writing to its original file.** Codex stores sessions
+   under `YYYY/MM/DD`, and the zero-padded names are chronological, so sorting the
+   directories by name looks like a free way to find the newest session. It isn't:
+   resume a four-day-old session and the freshest quota data on disk sits in the
+   oldest-looking folder. The name-sorted "winner" was days stale, its window had
+   expired, and the gauge reported "window reset" while Codex was running right
+   then. Sort candidates by modification time instead.
+3. **Codex emits two shapes of `rate_limits`.** `limit_id: "codex"` carries the
    percentages; `limit_id: "premium"` carries credits and leaves `primary` null.
    Taking the last `token_count` event shows an empty gauge about half the time.
    Scan backward for the last event with a non-null `primary`.
-3. **An expired `resetsAt` is worse than no data.** These logs only advance while
+4. **An expired `resetsAt` is worse than no data.** These logs only advance while
    the tool runs. Once the reset passes, a cached "100%" tells someone with a
    fresh window that they're blocked. Report the reset instead.
-4. **The 5-hour limit is a session window, not a rolling one.** It opens on your
+5. **The 5-hour limit is a session window, not a rolling one.** It opens on your
    first message and runs five hours. Reconstructing the blocks and checking the
    inferred reset against Claude's own countdown agreed to within four minutes.
-5. **The weekly limit is a fixed calendar window** ("Resets Fri 6:00 AM"), so the
+6. **The weekly limit is a fixed calendar window** ("Resets Fri 6:00 AM"), so the
    reset day and hour decide which days get summed. It's configurable for exactly
    that reason.
-6. **Debouncing isn't enough while an agent is running.** Its log is written
+7. **Debouncing isn't enough while an agent is running.** Its log is written
    continuously, so a 400 ms debounce still fired several times a second at ~75 ms
    per scan — 17% of a core, measured. A hard floor between scans drops it to 0%.
    The gauge may lag a few seconds; it may not spin your fans.
-7. **Everything shows *remaining*, never *used*.** A capsule once filled to
+8. **Everything shows *remaining*, never *used*.** A capsule once filled to
    "remaining" beside a label reading "used" — two contradictory statements at
    once, with no way for the reader to tell which. `Reading` exposes
    `percentUsed` and `percentRemaining` separately and only the latter is shown.
-8. **AppKit disables menu items that have no action**, so a menu full of data rows
+9. **AppKit disables menu items that have no action**, so a menu full of data rows
    renders entirely greyed out. `menu.autoenablesItems = false`.
-9. **`Calendar(identifier:)` with a nil locale silently returns abbreviated
+10. **`Calendar(identifier:)` with a nil locale silently returns abbreviated
    weekday symbols** ("Fri"), which reads as a clipped label. `Calendar.current`
    returns full names.
-10. **Anaconda ships its own `codesign`** that shadows Apple's on `PATH` and fails
+11. **Anaconda ships its own `codesign`** that shadows Apple's on `PATH` and fails
     with "arguments were not expected". The release script calls the system tools
     by absolute path.
-11. **Stapling only the DMG isn't enough.** `spctl` passes the app via an *online*
+12. **Stapling only the DMG isn't enough.** `spctl` passes the app via an *online*
     lookup, but once dragged to `/Applications` it carries no ticket of its own, so
     a first launch offline can hang. Notarise and staple the `.app` first, then
     build the DMG around it.

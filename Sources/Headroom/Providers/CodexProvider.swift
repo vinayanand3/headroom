@@ -33,12 +33,20 @@ struct CodexProvider: UsageProvider {
             return Snapshot(provider: id, readings: unavailable("Codex not installed"),
                             capturedAt: Date(), sourceDate: nil, planLabel: nil, rawWeighted: nil)
         }
-        guard let file = newestRollout() else {
+        let files = newestRollouts()
+        guard !files.isEmpty else {
             return Snapshot(provider: id, readings: unavailable("No sessions yet"),
                             capturedAt: Date(), sourceDate: nil, planLabel: nil, rawWeighted: nil)
         }
-        guard let hit = try lastQuotaEvent(in: file) else {
-            return Snapshot(provider: id, readings: unavailable("No quota event in latest session"),
+        // The freshest file may hold no quota event at all (a session that only
+        // just started), so fall through to the next rather than reporting
+        // nothing when perfectly good data sits one file over.
+        var found: Hit?
+        for file in files {
+            if let hit = try? lastQuotaEvent(in: file) { found = hit; break }
+        }
+        guard let hit = found else {
+            return Snapshot(provider: id, readings: unavailable("No quota event in recent sessions"),
                             capturedAt: Date(), sourceDate: nil, planLabel: nil, rawWeighted: nil)
         }
 
@@ -79,10 +87,21 @@ struct CodexProvider: UsageProvider {
 
     // MARK: - Finding the newest session
 
-    /// Layout is `sessions/YYYY/MM/DD/rollout-*.jsonl`. Zero-padded, so a plain
-    /// descending sort of the day directories is chronological — no stat calls
-    /// on thousands of files.
-    private func newestRollout() -> URL? {
+    /// Newest rollout files by **modification time**, not by directory name.
+    ///
+    /// The obvious optimisation is to sort the `sessions/YYYY/MM/DD` directories
+    /// descending and take the first one with files, since the names are
+    /// zero-padded and therefore chronological. That is wrong, and it fails
+    /// silently: a *resumed* session keeps appending to its original file, which
+    /// still lives in the directory for the day it was created. Resume a
+    /// four-day-old session and the freshest quota data on disk sits in the
+    /// oldest-looking folder, while the name-sorted winner is days stale — stale
+    /// enough that its window has expired, so the gauge reports "window reset"
+    /// while Codex is running right now.
+    ///
+    /// So: stat the files in the most recent handful of day directories and sort
+    /// by mtime. Bounded, so this stays a few dozen stats rather than thousands.
+    private func newestRollouts(limit: Int = 5) -> [URL] {
         let fm = FileManager.default
         func kids(_ url: URL) -> [URL] {
             let items = (try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey],
@@ -91,23 +110,32 @@ struct CodexProvider: UsageProvider {
                 .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
                 .sorted { $0.lastPathComponent > $1.lastPathComponent }
         }
-        for year in kids(sessionsRoot) {
+
+        // Walk the most recent day directories by name — that part is still a
+        // fine way to *find candidates* cheaply. It just can't pick the winner.
+        var days: [URL] = []
+        outer: for year in kids(sessionsRoot) {
             for month in kids(year) {
                 for day in kids(month) {
-                    let files = ((try? fm.contentsOfDirectory(at: day,
-                                    includingPropertiesForKeys: [.contentModificationDateKey],
-                                    options: [.skipsHiddenFiles])) ?? [])
-                        .filter { $0.pathExtension == "jsonl" && $0.lastPathComponent.hasPrefix("rollout-") }
-                    guard !files.isEmpty else { continue }
-                    return files.max { a, b in
-                        let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
-                        let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
-                        return da < db
-                    }
+                    days.append(day)
+                    if days.count >= 12 { break outer }
                 }
             }
         }
-        return nil
+
+        var candidates: [(url: URL, modified: Date)] = []
+        for day in days {
+            let files = ((try? fm.contentsOfDirectory(at: day,
+                            includingPropertiesForKeys: [.contentModificationDateKey],
+                            options: [.skipsHiddenFiles])) ?? [])
+                .filter { $0.pathExtension == "jsonl" && $0.lastPathComponent.hasPrefix("rollout-") }
+            for f in files {
+                let m = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?
+                    .contentModificationDate ?? .distantPast
+                candidates.append((f, m))
+            }
+        }
+        return candidates.sorted { $0.modified > $1.modified }.prefix(limit).map(\.url)
     }
 
     // MARK: - Reverse tail
