@@ -30,6 +30,12 @@ final class ClaudeProvider: UsageProvider, @unchecked Sendable {
     private var seenRequestIds: Set<String> = []
     private var rejections: [(date: Date, window: QuotaWindow)] = []
 
+    /// `(observed, window, fraction)`. Anthropic emits `utilization` only once you
+    /// pass ~90% of a window, so this can't drive the gauge — but each one is an
+    /// exact server-computed fraction, which makes it far better calibration data
+    /// than waiting to be rejected outright.
+    private var utilizations: [(date: Date, window: QuotaWindow, fraction: Double)] = []
+
     /// Keep a little more than a week so a calendar window near its boundary is
     /// still fully covered.
     private let retention: TimeInterval = 9 * 24 * 3600
@@ -40,7 +46,24 @@ final class ClaudeProvider: UsageProvider, @unchecked Sendable {
             .appendingPathComponent(".claude/projects", isDirectory: true)
     }
 
-    func watchRoots() -> [URL] { [projectsRoot] }
+    /// Claude Desktop's agent mode keeps its own transcripts here, and they are
+    /// **disjoint** from `~/.claude/projects` — verified by session id and by
+    /// record uuid, neither of which appears in both. That usage counts against
+    /// the same plan limit, so ignoring it under-reports. It is also the only
+    /// place I have found Anthropic writing an exact `utilization` figure.
+    private var agentModeRoot: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Claude/local-agent-mode-sessions",
+                                    isDirectory: true)
+    }
+
+    private var sourceRoots: [URL] {
+        var roots = [projectsRoot]
+        if FileManager.default.fileExists(atPath: agentModeRoot.path) { roots.append(agentModeRoot) }
+        return roots
+    }
+
+    func watchRoots() -> [URL] { sourceRoots }
 
     func isInstalled() -> Bool {
         var isDir: ObjCBool = false
@@ -151,6 +174,28 @@ final class ClaudeProvider: UsageProvider, @unchecked Sendable {
             ?? now.addingTimeInterval(-7 * 24 * 3600)
     }
 
+
+    /// Weighted total of the session block containing `t`. Calibration has to be
+    /// scored against the window the observation described, not against now.
+    private func sessionSum(at t: Date) -> Double {
+        var blockStart: Date?
+        var sum = 0.0
+        for e in entries where e.date <= t {
+            if let s = blockStart, e.date < s.addingTimeInterval(Self.sessionLength) {
+                sum += e.weight
+            } else {
+                blockStart = e.date
+                sum = e.weight
+            }
+        }
+        return sum
+    }
+
+    private func weekSum(at t: Date, calibration: Calibration) -> Double {
+        let start = weeklyWindowStart(now: t, calibration: calibration)
+        return entries.filter { $0.date >= start && $0.date <= t }.reduce(0) { $0 + $1.weight }
+    }
+
     // MARK: - Calibration from observed rejections
 
     private func learn(_ calibration: inout Calibration,
@@ -175,10 +220,28 @@ final class ClaudeProvider: UsageProvider, @unchecked Sendable {
             changed = true
         }
         rejections.removeAll()
-        if changed {
-            calibration.lastRejectionFolded = newest
-            CalibrationStore.save(calibration)
+        if changed { calibration.lastRejectionFolded = newest }
+
+        // An exact fraction beats inferring 100% from a rejection: capacity falls
+        // straight out of (what we measured) ÷ (what the server said we'd used).
+        var newestUtil = calibration.lastUtilizationFolded
+        for u in utilizations {
+            guard u.date.timeIntervalSince1970 > calibration.lastUtilizationFolded else { continue }
+            let span: TimeInterval = u.window == .short ? Self.sessionLength : 7 * 24 * 3600
+            guard let oldest = entries.first?.date,
+                  u.date.addingTimeInterval(-span) >= oldest else { continue }
+            // `self.` because learn()'s own parameters are named sessionSum/weekSum.
+            let measured = u.window == .short ? self.sessionSum(at: u.date)
+                                              : self.weekSum(at: u.date, calibration: calibration)
+            guard measured > 0 else { continue }
+            calibration.fold(measured / u.fraction, into: u.window)
+            newestUtil = max(newestUtil, u.date.timeIntervalSince1970)
+            changed = true
         }
+        utilizations.removeAll()
+        calibration.lastUtilizationFolded = newestUtil
+
+        if changed { CalibrationStore.save(calibration) }
     }
 
     private func reading(sum: Double, window: QuotaWindow,
@@ -199,16 +262,19 @@ final class ClaudeProvider: UsageProvider, @unchecked Sendable {
 
     private static let usageMarker = Data("\"usage\"".utf8)
     private static let quotaMarker = Data("quotaLimits".utf8)
+    private static let rateInfoMarker = Data("rate_limit_info".utf8)
 
     private func ingestNewBytes() {
         let fm = FileManager.default
         let cutoff = Date().addingTimeInterval(-retention)
 
-        guard let walker = fm.enumerator(at: projectsRoot,
-                                         includingPropertiesForKeys: [.contentModificationDateKey],
-                                         options: [.skipsHiddenFiles]) else { return }
+        let walkers = sourceRoots.compactMap {
+            fm.enumerator(at: $0, includingPropertiesForKeys: [.contentModificationDateKey],
+                          options: [.skipsHiddenFiles])
+        }
 
-        for case let url as URL in walker where url.pathExtension == "jsonl" {
+        for case let url as URL in walkers.flatMap({ $0.compactMap { $0 } })
+        where url.pathExtension == "jsonl" {
             let mod = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
                 .contentModificationDate ?? .distantPast
             // A file untouched since the cutoff can't hold records after it.
@@ -251,6 +317,7 @@ final class ClaudeProvider: UsageProvider, @unchecked Sendable {
             let data = Data(line)
             let hasUsage = data.range(of: Self.usageMarker) != nil
             let hasQuota = data.range(of: Self.quotaMarker) != nil
+                        || data.range(of: Self.rateInfoMarker) != nil
             guard hasUsage || hasQuota else { continue }
             guard let row = try? decoder.decode(ClaudeRow.self, from: data),
                   let date = row.date else { continue }
@@ -258,9 +325,19 @@ final class ClaudeProvider: UsageProvider, @unchecked Sendable {
             if let quota = row.quotaLimits, quota.status == "rejected", let w = quota.window {
                 rejections.append((date, w))
             }
+            // Claude Code calls it `quotaLimits`; the desktop agent logs call it
+            // `rate_limit_info`. Same shape, and the latter sometimes carries the
+            // exact fraction.
+            if let info = row.rateLimitInfo {
+                if info.status == "rejected", let w = info.window { rejections.append((date, w)) }
+                if let u = info.utilization, u > 0.05, u <= 1.5, let w = info.window {
+                    utilizations.append((date, w, u))
+                }
+            }
             guard let usage = row.message?.usage else { continue }
-            // Retries re-log the same request; don't bill it twice.
-            if let rid = row.requestId {
+            // Retries re-log the same request; don't bill it twice. Agent-mode
+            // records carry no requestId, so fall back to the record uuid.
+            if let rid = row.requestId ?? row.uuid {
                 guard seenRequestIds.insert(rid).inserted else { continue }
             }
             entries.append((date, weight(of: usage, model: row.message?.model)))
@@ -281,8 +358,15 @@ final class ClaudeProvider: UsageProvider, @unchecked Sendable {
 private struct ClaudeRow: Decodable {
     let timestamp: String?
     let requestId: String?
+    let uuid: String?
     let message: ClaudeMessage?
     let quotaLimits: ClaudeQuota?
+    let rateLimitInfo: ClaudeRateLimitInfo?
+
+    enum CodingKeys: String, CodingKey {
+        case timestamp, requestId, uuid, message, quotaLimits
+        case rateLimitInfo = "rate_limit_info"
+    }
 
     var date: Date? {
         guard let timestamp else { return nil }
@@ -307,6 +391,20 @@ struct ClaudeUsage: Decodable, Sendable {
         case outputTokens = "output_tokens"
         case cacheCreationInputTokens = "cache_creation_input_tokens"
         case cacheReadInputTokens = "cache_read_input_tokens"
+    }
+}
+
+private struct ClaudeRateLimitInfo: Decodable {
+    let status: String?
+    let rateLimitType: String?
+    let utilization: Double?
+
+    var window: QuotaWindow? {
+        switch rateLimitType {
+        case "five_hour": return .short
+        case "weekly", "opus_weekly", "seven_day": return .long
+        default: return nil
+        }
     }
 }
 

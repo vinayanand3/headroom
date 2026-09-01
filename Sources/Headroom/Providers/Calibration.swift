@@ -23,6 +23,10 @@ struct Calibration: Codable, Sendable {
     /// capacity toward that one window a little further each time.
     var lastRejectionFolded: Double = 0
 
+    /// Epoch seconds of the newest `utilization` observation already folded in.
+    /// Same reason as above: without it, every launch re-learns the same points.
+    var lastUtilizationFolded: Double = 0
+
     /// Hand-written so that adding a field never invalidates a saved file.
     ///
     /// Swift's synthesized `Codable` throws when a key is missing rather than
@@ -38,12 +42,13 @@ struct Calibration: Codable, Sendable {
         weeklyResetWeekday = try c.decodeIfPresent(Int.self, forKey: .weeklyResetWeekday) ?? 6
         weeklyResetHour = try c.decodeIfPresent(Int.self, forKey: .weeklyResetHour) ?? 6
         lastRejectionFolded = try c.decodeIfPresent(Double.self, forKey: .lastRejectionFolded) ?? 0
+        lastUtilizationFolded = try c.decodeIfPresent(Double.self, forKey: .lastUtilizationFolded) ?? 0
     }
 
     init(shortCapacity: Double, longCapacity: Double,
          shortObservations: Int, longObservations: Int,
          weeklyResetWeekday: Int = 6, weeklyResetHour: Int = 6,
-         lastRejectionFolded: Double = 0) {
+         lastRejectionFolded: Double = 0, lastUtilizationFolded: Double = 0) {
         self.shortCapacity = shortCapacity
         self.longCapacity = longCapacity
         self.shortObservations = shortObservations
@@ -51,6 +56,7 @@ struct Calibration: Codable, Sendable {
         self.weeklyResetWeekday = weeklyResetWeekday
         self.weeklyResetHour = weeklyResetHour
         self.lastRejectionFolded = lastRejectionFolded
+        self.lastUtilizationFolded = lastUtilizationFolded
     }
 
     /// Deliberately a guess, and labelled as one everywhere it surfaces.

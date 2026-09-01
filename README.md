@@ -42,6 +42,15 @@ Calibrating also captures usage from claude.ai and the Claude desktop app. Those
 share your plan limit but never appear in the local Claude Code logs, so they are
 an irreducible blind spot between calibrations.
 
+Headroom additionally reads Claude Desktop's agent-mode transcripts
+(`~/Library/Application Support/Claude/local-agent-mode-sessions/**/audit.jsonl`),
+which are disjoint from `~/.claude/projects` — verified by session id and record
+uuid, neither of which appears in both — and therefore represent real consumption
+that would otherwise be missed. Those logs are also the only place Anthropic has
+been observed writing an exact `utilization` fraction, which Headroom folds into
+the calibration when it appears. The catch: `utilization` is emitted only once a
+window passes ~90%, so it sharpens the estimate rather than replacing it.
+
 ### Why Gemini shows nothing
 
 Both Google apps *display* quota and neither *stores* it — verified rather than
